@@ -2,11 +2,13 @@ package com.google.android.apps.common.testing.accessibility.framework.replaceme
 
 import com.google.android.apps.common.testing.accessibility.framework.uielement.proto.AndroidFrameworkProtos.SpanProto;
 import com.google.android.apps.common.testing.accessibility.framework.uielement.proto.AndroidFrameworkProtos.SpanProto.SpanType;
+import com.google.errorprone.annotations.Immutable;
 
 /**
  * Represents a generic markup span within a {@link CharSequence}. Specific span implementations may
  * be found in {@link Spans}
  */
+@Immutable
 public class Span {
   private final String spanClassName;
   private final int start;
@@ -44,16 +46,16 @@ public class Span {
   }
 
   public SpanProto toProto() {
-    // Note that subclasses explicitly do not rely on inheritance to write properties managed by
-    // this class.  This is to ensure the SpanType is properly set from each specific span.
-    SpanProto.Builder builder = SpanProto.newBuilder();
-    builder.setSpanClassName(spanClassName);
-    builder.setStart(start);
-    builder.setEnd(end);
-    builder.setFlags(flags);
-    builder.setType(SpanType.UNKNOWN);
+    return toProtoBuilder(SpanType.UNKNOWN).build();
+  }
 
-    return builder.build();
+  protected SpanProto.Builder toProtoBuilder(SpanType type) {
+    return SpanProto.newBuilder()
+        .setSpanClassName(spanClassName)
+        .setStart(start)
+        .setEnd(end)
+        .setFlags(flags)
+        .setType(type);
   }
 
   protected Span copyWithAdjustedPosition(int newStart, int newEnd) {

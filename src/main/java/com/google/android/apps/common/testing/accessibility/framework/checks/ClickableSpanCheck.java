@@ -36,11 +36,12 @@ import java.util.Locale;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
- * Check to ensure that {@code ClickableSpan} is not being used in a TextView.
+ * Check to ensure that {@code ClickableSpan} is not being used in a TextView on a device running
+ * Android prior to O.
  *
- * <p>{@code ClickableSpan} is inaccessible because individual spans cannot be selected
- * independently in a single TextView and because accessibility services are unable to call
- * {@link ClickableSpan#onClick}.
+ * <p>{@code ClickableSpan} was inaccessible because individual spans could not be selected
+ * independently in a single TextView and because accessibility services were unable to call {@link
+ * ClickableSpan#onClick}. This was remedied in Anroid O.
  *
  * <p>The exception to this rule is that {@code URLSpan}s are accessible if they do not contain a
  * relative URI.
@@ -108,11 +109,20 @@ public class ClickableSpanCheck extends AccessibilityHierarchyCheck {
                 results.add(new AccessibilityHierarchyCheckResult(this.getClass(),
                     AccessibilityCheckResultType.ERROR, element, RESULT_ID_NULL_URL, null));
               } else {
-                Uri uri = new Uri(url);
-                if (uri.isRelative()) {
-                  // Relative URIs cannot be resolved.
-                  results.add(new AccessibilityHierarchyCheckResult(this.getClass(),
-                      AccessibilityCheckResultType.ERROR, element, RESULT_ID_RELATIVE_LINK, null));
+                try {
+                  Uri uri = new Uri(url);
+                  if (uri.isRelative()) {
+                    // Relative URIs cannot be resolved.
+                    results.add(
+                        new AccessibilityHierarchyCheckResult(
+                            this.getClass(),
+                            AccessibilityCheckResultType.ERROR,
+                            element,
+                            RESULT_ID_RELATIVE_LINK,
+                            null));
+                  }
+                } catch (IllegalArgumentException e) {
+                  // Ignore malformed URLs
                 }
               }
             } else if (span instanceof Spans.ClickableSpan) { // Non-URLSpan ClickableSpan

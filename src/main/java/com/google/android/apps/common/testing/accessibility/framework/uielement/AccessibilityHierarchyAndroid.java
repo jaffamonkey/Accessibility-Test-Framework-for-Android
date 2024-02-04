@@ -15,6 +15,7 @@
  */
 package com.google.android.apps.common.testing.accessibility.framework.uielement;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
@@ -24,32 +25,33 @@ import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.Region;
 import android.os.Build;
-import android.os.Parcel;
-import android.os.Parcelable;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeInfo.TouchDelegateInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
+import androidx.annotation.ChecksSdkIntAtLeast;
 import androidx.annotation.RequiresApi;
 import androidx.annotation.VisibleForTesting;
+import androidx.core.os.BuildCompat;
 import com.google.android.apps.common.testing.accessibility.framework.ViewAccessibilityUtils;
 import com.google.android.apps.common.testing.accessibility.framework.replacements.Rect;
-import com.google.android.apps.common.testing.accessibility.framework.uielement.proto.AccessibilityHierarchyProtos.AccessibilityHierarchyProto;
+import com.google.android.apps.common.testing.accessibility.framework.replacements.TextUtils;
 import com.google.android.apps.common.testing.accessibility.framework.uielement.proto.AccessibilityHierarchyProtos.ViewElementClassNamesProto;
-import com.google.android.apps.common.testing.accessibility.framework.uielement.proto.AccessibilityHierarchyProtos.WindowHierarchyElementProto;
 import com.google.android.libraries.accessibility.utils.log.LogUtils;
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
-import java.util.ArrayList;
+import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.Set;
+import java.util.Objects;
+import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 
 /**
@@ -58,28 +60,30 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  * <p>Such a hierarchy may contain a forest of {@link WindowHierarchyElementAndroid}s, each of which
  * contain a tree of {@link ViewHierarchyElementAndroid}s.
  */
-public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implements Parcelable {
+public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy {
 
   private static final String TAG = "A11yHierarchyAndroid";
 
+  @ChecksSdkIntAtLeast(api = Build.VERSION_CODES.Q)
   private static final boolean AT_29 = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q);
+
+  @ChecksSdkIntAtLeast(api = Build.VERSION_CODES.LOLLIPOP_MR1)
   private static final boolean AT_22 = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1);
-  private static final boolean AT_17 =
-      (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1);
 
   private final DeviceStateAndroid deviceState;
 
-  private final List<WindowHierarchyElementAndroid> windowHierarchyElements;
+  private final ImmutableList<WindowHierarchyElementAndroid> windowHierarchyElements;
 
   /* A reference to the 'active' window. Exactly one such window exists in any hierarchy. */
   private final WindowHierarchyElementAndroid activeWindow;
 
   private AccessibilityHierarchyAndroid(
       DeviceStateAndroid deviceState,
-      List<WindowHierarchyElementAndroid> windowHierarchyElements,
+      AccessibilityHierarchyOrigin origin,
+      ImmutableList<WindowHierarchyElementAndroid> windowHierarchyElements,
       WindowHierarchyElementAndroid activeWindow,
       ViewElementClassNamesAndroid viewElementClassNames) {
-    super(deviceState, windowHierarchyElements, activeWindow, viewElementClassNames);
+    super(deviceState, origin, windowHierarchyElements, activeWindow, viewElementClassNames);
     this.deviceState = deviceState;
     this.windowHierarchyElements = windowHierarchyElements;
     this.activeWindow = activeWindow;
@@ -101,7 +105,7 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
    */
   @Override
   public Collection<WindowHierarchyElementAndroid> getAllWindows() {
-    return Collections.unmodifiableCollection(windowHierarchyElements);
+    return windowHierarchyElements;
   }
 
   /**
@@ -144,117 +148,6 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
     return getWindowById(windowId).getViewById(viewId);
   }
 
-  @Override
-  public int describeContents() {
-    return 0;
-  }
-
-  /**
-   * @return an {@link AccessibilityHierarchyProto} protocol buffer representation of this hierarchy
-   */
-  @Override
-  public AccessibilityHierarchyProto toProto() {
-    AccessibilityHierarchyProto.Builder builder = AccessibilityHierarchyProto.newBuilder();
-    builder
-        .setDeviceState(deviceState.toProto())
-        .setActiveWindowId(activeWindow.getId())
-        .setViewElementClassNames(viewElementClassNames.toProto());
-    for (WindowHierarchyElementAndroid window : windowHierarchyElements) {
-      builder.addWindows(window.toProto());
-    }
-
-    return builder.build();
-  }
-
-  @Override
-  public void writeToParcel(Parcel out, int flags) {
-    deviceState.writeToParcel(out, flags);
-    List<WindowHierarchyElementAndroid> rootWindows = new ArrayList<>();
-    for (WindowHierarchyElementAndroid window : windowHierarchyElements) {
-      if (window.getParentWindow() == null) {
-        rootWindows.add(window);
-      }
-    }
-
-    // Consistency check - the total number of windows in the hierarchy
-    out.writeInt(windowHierarchyElements.size());
-
-    // The number of root windows present
-    out.writeInt(rootWindows.size());
-
-    // Traverse each window structure and read its content depth-first
-    for (WindowHierarchyElementAndroid window : rootWindows) {
-      writeWindowHierarchyToParcel(window, out);
-    }
-
-    writeMapToParcel(viewElementClassNames.getMap(), out);
-  }
-
-  private static void writeWindowHierarchyToParcel(
-      WindowHierarchyElementAndroid element, Parcel out) {
-    element.writeToParcel(out);
-    int childCount = element.getChildWindowCount();
-    out.writeInt(childCount);
-    for (int i = 0; i < childCount; ++i) {
-      writeWindowHierarchyToParcel(element.getChildWindow(i), out);
-    }
-  }
-
-  private static void writeMapToParcel(Map<String, Integer> map, Parcel out) {
-    out.writeInt(map.size());
-    for (Map.Entry<String, Integer> entry : map.entrySet()) {
-      out.writeString(entry.getKey());
-      out.writeInt(entry.getValue());
-    }
-  }
-
-  private static Map<String, Integer> readMapFromParcel(Parcel in) {
-    BiMap<String, Integer> viewElementsMap = HashBiMap.<String, Integer>create();
-    int mapSize = in.readInt();
-    for (int i = 0; i < mapSize; i++) {
-      viewElementsMap.put(in.readString(), in.readInt());
-    }
-    return viewElementsMap;
-  }
-
-  /**
-   * @param in non-null {@link Parcel} written by {@link #writeToParcel(Parcel, int)} from which to
-   *     create a hierarchy.
-   */
-  private static AccessibilityHierarchyAndroid readFromParcel(Parcel in) {
-    DeviceStateAndroid deviceState = DeviceStateAndroid.newBuilder(in).build();
-    int totalWindows = in.readInt();
-    int rootWindows = in.readInt();
-
-    List<WindowHierarchyElementAndroid> windowHierarchyElements = new ArrayList<>(totalWindows);
-    for (int i = 0; i < rootWindows; ++i) {
-      buildWindowHierarchy(in, windowHierarchyElements, null);
-    }
-
-    checkState(
-        windowHierarchyElements.size() == totalWindows,
-        "Window hierarchy failed consistency check.");
-
-    // Identify the active window - there should be exactly one.
-    WindowHierarchyElementAndroid activeWindow = null;
-    for (WindowHierarchyElementAndroid window : windowHierarchyElements) {
-      if (Boolean.TRUE.equals(window.isActive())) {
-        checkState(activeWindow == null, "More than one active window detected.");
-        activeWindow = window;
-      }
-    }
-    checkNotNull(activeWindow, "No active windows detected.");
-
-    ViewElementClassNamesAndroid viewElementClassNames =
-        new ViewElementClassNamesAndroid(readMapFromParcel(in));
-
-    AccessibilityHierarchyAndroid hierarchy =
-        new AccessibilityHierarchyAndroid(
-            deviceState, windowHierarchyElements, activeWindow, viewElementClassNames);
-    hierarchy.setAccessibilityHierarchy();
-    return hierarchy;
-  }
-
   /**
    * Create a new {@link WindowHierarchyElementAndroid} from an AccessibilityWindowInfo and append
    * it and its child windows to the list of windows within this hierarchy. Its {@code id} will
@@ -278,7 +171,7 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
       List<WindowHierarchyElementAndroid> elementList,
       @Nullable WindowHierarchyElementAndroid parent,
       BiMap<Long, AccessibilityNodeInfo> originMap,
-      @Nullable AccessibilityNodeInfoExtraDataExtractor extraDataExtractor) {
+      AccessibilityNodeInfoExtraDataExtractor extraDataExtractor) {
     WindowHierarchyElementAndroid element =
         WindowHierarchyElementAndroid.newBuilder(elementList.size(), info, extraDataExtractor)
             .setParent(parent)
@@ -291,26 +184,7 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
       if (child != null) {
         element.addChild(
             buildWindowHierarchy(child, elementList, element, originMap, extraDataExtractor));
-        child.recycle();
       }
-    }
-
-    return element;
-  }
-
-  private static WindowHierarchyElementAndroid buildWindowHierarchy(
-      Parcel fromParcel,
-      List<WindowHierarchyElementAndroid> elementList,
-      @Nullable WindowHierarchyElementAndroid parent) {
-    WindowHierarchyElementAndroid element =
-        WindowHierarchyElementAndroid.newBuilder(elementList.size(), fromParcel)
-            .setParent(parent)
-            .build();
-    elementList.add(element);
-
-    int childWindowCount = fromParcel.readInt();
-    for (int i = 0; i < childWindowCount; ++i) {
-      element.addChild(buildWindowHierarchy(fromParcel, elementList, element));
     }
 
     return element;
@@ -324,7 +198,6 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
    *     AccessibilityNodeInfo} structures from which a {@link ViewHierarchyElementAndroid} was
    *     constructed, as populated by {@link AccessibilityHierarchyAndroid} constructors.
    */
-  @RequiresApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
   private void resolveLabelForRelationshipsAmongInfos(
       BiMap<Long, AccessibilityNodeInfo> originMap) {
     for (Map.Entry<Long, AccessibilityNodeInfo> entry : originMap.entrySet()) {
@@ -344,7 +217,6 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
    * For every View in {@code originMap} that has a labelFor value, set labeledBy on the
    * ViewHierarchyElementAndroid that represents the View with the referenced View ID.
    */
-  @RequiresApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
   private void resolveLabelForRelationshipsAmongViews(
       Context context, BiMap<Long, View> originMap) {
     for (Map.Entry<Long, View> entry : originMap.entrySet()) {
@@ -513,19 +385,6 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
     }
   }
 
-  public static final Parcelable.Creator<AccessibilityHierarchyAndroid> CREATOR =
-      new Parcelable.Creator<AccessibilityHierarchyAndroid>() {
-        @Override
-        public AccessibilityHierarchyAndroid createFromParcel(Parcel in) {
-          return readFromParcel(checkNotNull(in));
-        }
-
-        @Override
-        public AccessibilityHierarchyAndroid[] newArray(int size) {
-          return new AccessibilityHierarchyAndroid[size];
-        }
-      };
-
   /**
    * Returns a new builder that can build an AccessibilityHierarchy from a View.
    *
@@ -579,17 +438,6 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
   }
 
   /**
-   * Returns a new builder that can build an AccessibilityHierarchy from a proto.
-   *
-   * @param proto A protocol buffer representation of a hierarchy
-   */
-  public static BuilderAndroid newBuilder(AccessibilityHierarchyProto proto) {
-    BuilderAndroid builder = new BuilderAndroid();
-    builder.proto = checkNotNull(proto);
-    return builder;
-  }
-
-  /**
    * Maintains a bidirectional mapping between View class names and a unique integer identifier for
    * each of those classes.
    */
@@ -628,7 +476,7 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
       Map<String, Integer> classIdMap = new HashMap<>();
       for (WindowHierarchyElementAndroid window : windowHierarchyElements) {
         for (ViewHierarchyElementAndroid view : window.getAllViews()) {
-          Set<String> classReferenceSet = getSuperclassSet(view, customViewBuilder);
+          ImmutableSet<String> classReferenceSet = getSuperclassSet(view, customViewBuilder);
 
           for (String className : classReferenceSet) {
             Integer classNameId = classIdMap.get(className);
@@ -645,19 +493,33 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
 
     /**
      * Returns all the superclasses of view element represented by {@link
-     * ViewHierarchyElementAndroid}.
+     * ViewHierarchyElementAndroid}.The result will contain all of the superclasses of view's class
+     * name and accessibility class name, if any.
      */
     private static ImmutableSet<String> getSuperclassSet(
         ViewHierarchyElementAndroid view, CustomViewBuilderAndroid customViewBuilder) {
       CharSequence className = view.getClassName();
-
-      if (className == null) {
+      CharSequence accessibilityClassName = view.getAccessibilityClassName();
+      if ((className == null) && (accessibilityClassName == null)) {
         return ImmutableSet.of();
       }
 
-      Class<?> viewClass = getClassByName(view, className.toString(), customViewBuilder);
-
       ImmutableSet.Builder<String> builder = new ImmutableSet.Builder<>();
+      if (accessibilityClassName != null) {
+        builder.addAll(getSuperclassSet(view, accessibilityClassName, customViewBuilder));
+      }
+      if ((className != null) && !TextUtils.equals(className, accessibilityClassName)) {
+        builder.addAll(getSuperclassSet(view, className, customViewBuilder));
+      }
+      return builder.build();
+    }
+
+    private static ImmutableSet<String> getSuperclassSet(
+        ViewHierarchyElementAndroid view,
+        CharSequence className,
+        CustomViewBuilderAndroid customViewBuilder) {
+      ImmutableSet.Builder<String> builder = new ImmutableSet.Builder<>();
+      Class<?> viewClass = getClassByName(view, className.toString(), customViewBuilder);
       while ((viewClass != null) && !viewClass.equals(Object.class)) {
         builder.add(viewClass.getName());
         addAllSuperinterfacesRecursivelyToSetBuilder(viewClass, builder);
@@ -679,12 +541,16 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
   /**
    * A builder for {@link AccessibilityHierarchyAndroid}; obtained using {@link
    * AccessibilityHierarchyAndroid#builder}.
+   *
+   * <p>This builder can construct a hierarchy from a View, AccessibilityNodeInfo or
+   * List&lt;AccessibilityWindowInfo&gt;. To build a hierarchy from a AccessibilityHierarchyProto,
+   * use AccessibilityHierarchy.BuilderAndroid.
    */
-  public static class BuilderAndroid extends Builder {
+  public static class BuilderAndroid {
     private static final CustomViewBuilderAndroid DEFAULT_CUSTOM_VIEW_BUILDER =
         new DefaultCustomViewBuilderAndroid();
 
-    private @Nullable View fromRootView;
+    private @MonotonicNonNull View fromRootView;
     private CustomViewBuilderAndroid customViewBuilder = DEFAULT_CUSTOM_VIEW_BUILDER;
 
     private @Nullable List<AccessibilityWindowInfo> fromWindowList;
@@ -692,10 +558,11 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
     private @Nullable Context context;
     private @Nullable BiMap<Long, AccessibilityNodeInfo> nodeInfoOriginMap;
     private @Nullable BiMap<Long, View> viewOriginMap;
-    private boolean disposeInstances = false;
-    private boolean obtainCharacterLocations = false;
+    private boolean obtainCharacterLocations = true;
+    private boolean obtainRenderingInfo = true;
 
-    private boolean obtainRenderingInfo = false;
+    /** The maximum allowed length of the requested text location data. */
+    private @Nullable Integer characterLocationArgMaxLength;
 
     /**
      * Indicates whether text character locations should be requested.
@@ -703,8 +570,25 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
      * @param obtainCharacterLocations The value to which the flag should be set.
      * @return this
      */
+    @CanIgnoreReturnValue
     public BuilderAndroid setObtainCharacterLocations(boolean obtainCharacterLocations) {
       this.obtainCharacterLocations = obtainCharacterLocations;
+      return this;
+    }
+
+    /**
+     * Sets the maximum allowed length of the requested text location data.
+     *
+     * @param characterLocationArgMaxLength The maximum allowed length of the requested text
+     *     location data. Must be positive.
+     * @throws IllegalArgumentException If the given value is not positive.
+     * @return this
+     */
+    @CanIgnoreReturnValue
+    public BuilderAndroid setCharacterLocationArgMaxLength(int characterLocationArgMaxLength) {
+      checkArgument(
+          characterLocationArgMaxLength > 0, "characterLocationArgMaxLength must be positive.");
+      this.characterLocationArgMaxLength = characterLocationArgMaxLength;
       return this;
     }
 
@@ -712,8 +596,21 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
      * Set a {@link CustomViewBuilderAndroid} which customizes how to build a {@link
      * AccessibilityHierarchyAndroid} from a View.
      */
+    @CanIgnoreReturnValue
     public BuilderAndroid setCustomViewBuilder(CustomViewBuilderAndroid customViewBuilder) {
       this.customViewBuilder = customViewBuilder;
+      return this;
+    }
+
+    /**
+     * Indicates whether rendering info should be requested. This is enabled by default.
+     *
+     * @param enabled whether rendering info should be requested.
+     * @return this
+     */
+    @CanIgnoreReturnValue
+    public BuilderAndroid setObtainRenderingInfo(boolean enabled) {
+      this.obtainRenderingInfo = enabled;
       return this;
     }
 
@@ -721,9 +618,9 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
      * Set a map to populate with the condensed unique IDs of the {@link
      * ViewHierarchyElementAndroid}s created during construction of the hierarchy mapped to their
      * originating {@link AccessibilityNodeInfo}s. This is optional, and is only used when building
-     * a hierarchy from an {@code AccessibilityNodeInfo} or a {@code
-     * List&lt;AccessibilityWindowInfo&gt;}.
+     * a hierarchy from an {@code AccessibilityNodeInfo} or a {@code List<AccessibilityWindowInfo>}.
      */
+    @CanIgnoreReturnValue
     public BuilderAndroid setNodeInfoOriginMap(BiMap<Long, AccessibilityNodeInfo> originMap) {
       this.nodeInfoOriginMap = originMap;
       return this;
@@ -735,16 +632,23 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
      * originating {@link View}s. This is optional, and is only used when building a hierarchy from
      * a {@code View}.
      */
+    @CanIgnoreReturnValue
     public BuilderAndroid setViewOriginMap(BiMap<Long, View> originMap) {
       this.viewOriginMap = originMap;
       return this;
     }
 
-    @Override
     public AccessibilityHierarchyAndroid build() {
       AccessibilityHierarchyAndroid result;
       if (fromRootView != null) {
-        result = buildHierarchyFromView(fromRootView);
+        if (BuildCompat.isAtLeastU() && !isRobolectric()) {
+          result =
+              buildHierarchyFromViewAndItsNodeInfo(
+                  fromRootView, getAccessibilityNodeInfoExtraDataExtractor());
+        } else {
+          result =
+              buildHierarchyFromView(fromRootView, getAccessibilityNodeInfoExtraDataExtractor());
+        }
       } else if ((fromRootNode != null) && (context != null)) {
         result =
             buildHierarchyFromNodeInfo(
@@ -753,8 +657,6 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
         result =
             buildHierarchyFromWindowList(
                 fromWindowList, context, getAccessibilityNodeInfoExtraDataExtractor());
-      } else if (proto != null) {
-        result = buildHierarchyFromProto(proto);
       } else {
         throw new IllegalStateException("Nothing from which to build");
       }
@@ -762,26 +664,101 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
       return result;
     }
 
+    private static boolean isRobolectric() {
+      return Objects.equals(Build.FINGERPRINT, "robolectric");
+    }
+
     @VisibleForTesting
     AccessibilityNodeInfoExtraDataExtractor getAccessibilityNodeInfoExtraDataExtractor() {
       return new AccessibilityNodeInfoExtraDataExtractor(
-          obtainCharacterLocations, obtainRenderingInfo);
+          obtainCharacterLocations, obtainRenderingInfo, characterLocationArgMaxLength);
     }
 
-    private AccessibilityHierarchyAndroid buildHierarchyFromView(View fromRootView) {
-      if (this.viewOriginMap == null) {
+    /**
+     * Builds a hierarchy from a View using functionality added in Android U. The tree of
+     * AccessibilityNodeInfo objects is obtained from the View, and then the hierarchy is primarily
+     * built from the ANIs. However this is supplimented with information from the View objects. And
+     * a partial mapping from ANIs to their corresponding Views is constructed as an aid to
+     * reporting the findings.
+     */
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+
+    private AccessibilityHierarchyAndroid buildHierarchyFromViewAndItsNodeInfo(
+        View fromRootView, AccessibilityNodeInfoExtraDataExtractor extraDataExtractor) {
+      if (nodeInfoOriginMap == null) {
         // If we're not provided with a map to populate with originating structures, create one to
         // be used internally during hierarchy constructions
-        this.disposeInstances = true;
-        this.viewOriginMap = HashBiMap.<Long, View>create();
+        nodeInfoOriginMap = HashBiMap.<Long, AccessibilityNodeInfo>create();
+      }
+
+      AccessibilityNodeInfo fromRootNode = fromRootView.createAccessibilityNodeInfo();
+      fromRootNode.setQueryFromAppProcessEnabled(fromRootView, true);
+
+      Map<AccessibilityNodeInfo, View> nodeToViewMap = new HashMap<>();
+      mapNodesToViews(fromRootView, nodeToViewMap);
+
+      WindowHierarchyElementAndroid.BuilderAndroid activeWindowBuilder =
+          WindowHierarchyElementAndroid.newBuilder(0, fromRootNode, extraDataExtractor)
+              .setNodeInfoOriginMap(checkNotNull(nodeInfoOriginMap))
+              .setNodeToViewMap(nodeToViewMap);
+      if (viewOriginMap != null) {
+        activeWindowBuilder.setViewOriginMap(checkNotNull(viewOriginMap));
+      }
+      WindowHierarchyElementAndroid activeWindow = activeWindowBuilder.build();
+      ImmutableList<WindowHierarchyElementAndroid> windowHierarchyElements =
+          ImmutableList.of(activeWindow);
+      context = fromRootView.getContext();
+      DeviceStateAndroid deviceState = DeviceStateAndroid.newBuilder(context).build();
+      ViewElementClassNamesAndroid viewElementClassNames =
+          new ViewElementClassNamesAndroid(windowHierarchyElements, customViewBuilder);
+
+      AccessibilityHierarchyAndroid hierarchy =
+          new AccessibilityHierarchyAndroid(
+              deviceState,
+              AccessibilityHierarchyOrigin.ACCESSIBILITY_NODE_INFOS_AND_VIEWS,
+              windowHierarchyElements,
+              activeWindow,
+              viewElementClassNames);
+      hierarchy.setAccessibilityHierarchy();
+
+      // Resolve inter-node relationships once the hierarchy is constructed
+      hierarchy.resolveLabelForRelationshipsAmongInfos(checkNotNull(nodeInfoOriginMap));
+      hierarchy.resolveAccessibilityTraversalRelationshipsAmongInfos(
+          checkNotNull(nodeInfoOriginMap));
+      hierarchy.resolveTouchDelegateRelationshipsAmongInfos(checkNotNull(nodeInfoOriginMap));
+      return hierarchy;
+    }
+
+    /** Adds a map entry for the given view and each of its VISIBLE descendants. */
+    private static void mapNodesToViews(View view, Map<AccessibilityNodeInfo, View> nodeToViewMap) {
+      nodeToViewMap.put(view.createAccessibilityNodeInfo(), view);
+
+      if (view instanceof ViewGroup) {
+        ViewGroup viewGroup = (ViewGroup) view;
+        for (int i = 0; i < viewGroup.getChildCount(); ++i) {
+          View child = viewGroup.getChildAt(i);
+          if (child.getVisibility() == View.VISIBLE) {
+            mapNodesToViews(child, nodeToViewMap);
+          }
+        }
+      }
+    }
+
+    private AccessibilityHierarchyAndroid buildHierarchyFromView(
+        View fromRootView, AccessibilityNodeInfoExtraDataExtractor extraDataExtractor) {
+      if (viewOriginMap == null) {
+        // If we're not provided with a map to populate with originating structures, create one to
+        // be used internally during hierarchy constructions
+        viewOriginMap = HashBiMap.<Long, View>create();
       }
 
       WindowHierarchyElementAndroid activeWindow =
-          WindowHierarchyElementAndroid.newBuilder(0, fromRootView, customViewBuilder)
+          WindowHierarchyElementAndroid.newBuilder(
+                  0, fromRootView, customViewBuilder, extraDataExtractor)
               .setViewOriginMap(checkNotNull(viewOriginMap))
               .build();
-      List<WindowHierarchyElementAndroid> windowHierarchyElements =
-          Lists.<WindowHierarchyElementAndroid>newArrayList(activeWindow);
+      ImmutableList<WindowHierarchyElementAndroid> windowHierarchyElements =
+          ImmutableList.of(activeWindow);
       Context context = fromRootView.getContext();
       DeviceStateAndroid deviceState = DeviceStateAndroid.newBuilder(context).build();
       ViewElementClassNamesAndroid viewElementClassNames =
@@ -789,13 +766,15 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
 
       AccessibilityHierarchyAndroid hierarchy =
           new AccessibilityHierarchyAndroid(
-              deviceState, windowHierarchyElements, activeWindow, viewElementClassNames);
+              deviceState,
+              AccessibilityHierarchyOrigin.VIEWS,
+              windowHierarchyElements,
+              activeWindow,
+              viewElementClassNames);
       hierarchy.setAccessibilityHierarchy();
 
       // Resolve inter-node relationships once the hierarchy is constructed
-      if (AT_17) {
-        hierarchy.resolveLabelForRelationshipsAmongViews(context, checkNotNull(viewOriginMap));
-      }
+      hierarchy.resolveLabelForRelationshipsAmongViews(context, checkNotNull(viewOriginMap));
       if (AT_22) {
         hierarchy.resolveAccessibilityTraversalRelationshipsAmongViews(
             context, checkNotNull(viewOriginMap));
@@ -806,11 +785,10 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
     private AccessibilityHierarchyAndroid buildHierarchyFromNodeInfo(
         AccessibilityNodeInfo fromRootNode,
         Context context,
-        @Nullable AccessibilityNodeInfoExtraDataExtractor extraDataExtractor) {
+        AccessibilityNodeInfoExtraDataExtractor extraDataExtractor) {
       if (nodeInfoOriginMap == null) {
         // If we're not provided with a map to populate with originating structures, create one to
         // be used internally during hierarchy constructions
-        disposeInstances = true;
         nodeInfoOriginMap = HashBiMap.<Long, AccessibilityNodeInfo>create();
       }
 
@@ -818,21 +796,23 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
           WindowHierarchyElementAndroid.newBuilder(0, fromRootNode, extraDataExtractor)
               .setNodeInfoOriginMap(checkNotNull(nodeInfoOriginMap))
               .build();
-      List<WindowHierarchyElementAndroid> windowHierarchyElements =
-          Lists.<WindowHierarchyElementAndroid>newArrayList(activeWindow);
+      ImmutableList<WindowHierarchyElementAndroid> windowHierarchyElements =
+          ImmutableList.of(activeWindow);
       DeviceStateAndroid deviceState = DeviceStateAndroid.newBuilder(context).build();
       ViewElementClassNamesAndroid viewElementClassNames =
           new ViewElementClassNamesAndroid(windowHierarchyElements, customViewBuilder);
 
       AccessibilityHierarchyAndroid hierarchy =
           new AccessibilityHierarchyAndroid(
-              deviceState, windowHierarchyElements, activeWindow, viewElementClassNames);
+              deviceState,
+              AccessibilityHierarchyOrigin.ACCESSIBILITY_NODE_INFOS,
+              windowHierarchyElements,
+              activeWindow,
+              viewElementClassNames);
       hierarchy.setAccessibilityHierarchy();
 
       // Resolve inter-node relationships once the hierarchy is constructed
-      if (AT_17) {
-        hierarchy.resolveLabelForRelationshipsAmongInfos(checkNotNull(nodeInfoOriginMap));
-      }
+      hierarchy.resolveLabelForRelationshipsAmongInfos(checkNotNull(nodeInfoOriginMap));
       if (AT_22) {
         hierarchy.resolveAccessibilityTraversalRelationshipsAmongInfos(
             checkNotNull(nodeInfoOriginMap));
@@ -847,16 +827,15 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
     private AccessibilityHierarchyAndroid buildHierarchyFromWindowList(
         List<AccessibilityWindowInfo> fromWindowList,
         Context context,
-        @Nullable AccessibilityNodeInfoExtraDataExtractor extraDataExtractor) {
+        AccessibilityNodeInfoExtraDataExtractor extraDataExtractor) {
       if (nodeInfoOriginMap == null) {
         // If we're not provided with a map to populate with originating structures, create one to
         // be used internally during hierarchy constructions
-        disposeInstances = true;
         nodeInfoOriginMap = HashBiMap.<Long, AccessibilityNodeInfo>create();
       }
 
-      List<WindowHierarchyElementAndroid> windowHierarchyElements =
-          new ArrayList<>(fromWindowList.size());
+      List<WindowHierarchyElementAndroid> mutableWindowHierarchyElements =
+          Lists.<WindowHierarchyElementAndroid>newArrayListWithExpectedSize(fromWindowList.size());
       for (AccessibilityWindowInfo window : fromWindowList) {
         if (window.getParent() == null) {
           /*
@@ -868,14 +847,16 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
            */
           buildWindowHierarchy(
               window,
-              windowHierarchyElements,
+              mutableWindowHierarchyElements,
               /* parent= */ null,
               checkNotNull(nodeInfoOriginMap),
               extraDataExtractor);
         }
       }
+      ImmutableList<WindowHierarchyElementAndroid> windowHierarchyElements =
+          ImmutableList.copyOf(mutableWindowHierarchyElements);
 
-      // Store a reference to the active window - there should be exactly one.
+      // Store a reference to the active window. There should be exactly one.
       WindowHierarchyElementAndroid activeWindow = null;
       for (WindowHierarchyElementAndroid window : windowHierarchyElements) {
         if (Boolean.TRUE.equals(window.isActive())) {
@@ -890,13 +871,15 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
 
       AccessibilityHierarchyAndroid hierarchy =
           new AccessibilityHierarchyAndroid(
-              deviceState, windowHierarchyElements, activeWindow, viewElementClassNames);
+              deviceState,
+              AccessibilityHierarchyOrigin.WINDOW_LIST,
+              windowHierarchyElements,
+              activeWindow,
+              viewElementClassNames);
       hierarchy.setAccessibilityHierarchy();
 
       // Resolve inter-node relationships once the hierarchy is constructed
-      if (AT_17) {
-        hierarchy.resolveLabelForRelationshipsAmongInfos(checkNotNull(nodeInfoOriginMap));
-      }
+      hierarchy.resolveLabelForRelationshipsAmongInfos(checkNotNull(nodeInfoOriginMap));
       if (AT_22) {
         hierarchy.resolveAccessibilityTraversalRelationshipsAmongInfos(
             checkNotNull(nodeInfoOriginMap));
@@ -907,38 +890,7 @@ public class AccessibilityHierarchyAndroid extends AccessibilityHierarchy implem
       return hierarchy;
     }
 
-    private static AccessibilityHierarchyAndroid buildHierarchyFromProto(
-        AccessibilityHierarchyProto proto) {
-      DeviceStateAndroid deviceState =
-          DeviceStateAndroid.newBuilder(proto.getDeviceState()).build();
-      int activeWindowId = proto.getActiveWindowId();
-
-      List<WindowHierarchyElementAndroid> windowHierarchyElements =
-          new ArrayList<>(proto.getWindowsCount());
-      for (WindowHierarchyElementProto windowProto : proto.getWindowsList()) {
-        windowHierarchyElements.add(WindowHierarchyElementAndroid.newBuilder(windowProto).build());
-      }
-      checkState(
-          !windowHierarchyElements.isEmpty(), "Hierarchies must contain at least one window.");
-      WindowHierarchyElementAndroid activeWindow = windowHierarchyElements.get(activeWindowId);
-      ViewElementClassNamesAndroid viewElementClassNames =
-          new ViewElementClassNamesAndroid(proto.getViewElementClassNames());
-
-      AccessibilityHierarchyAndroid hierarchy =
-          new AccessibilityHierarchyAndroid(
-              deviceState, windowHierarchyElements, activeWindow, viewElementClassNames);
-      hierarchy.setAccessibilityHierarchy();
-      return hierarchy;
-    }
-
     private void disposeOfMaps() {
-      if (disposeInstances) {
-        if (nodeInfoOriginMap != null) {
-          for (AccessibilityNodeInfo nodeInfo : nodeInfoOriginMap.values()) {
-            nodeInfo.recycle();
-          }
-        }
-      }
       viewOriginMap = null;
       nodeInfoOriginMap = null;
     }

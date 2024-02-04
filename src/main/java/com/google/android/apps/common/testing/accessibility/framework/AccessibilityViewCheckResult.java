@@ -17,23 +17,17 @@ package com.google.android.apps.common.testing.accessibility.framework;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 import android.view.View;
-import com.google.android.apps.common.testing.accessibility.framework.uielement.AccessibilityHierarchy;
+import com.google.android.apps.common.testing.accessibility.framework.uielement.ViewHierarchyElement;
 import com.google.android.apps.common.testing.accessibility.framework.utils.contrast.Image;
+import com.google.common.annotations.VisibleForTesting;
 import java.util.Locale;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.dataflow.qual.Pure;
 
-/**
- * Result generated when an accessibility check runs on a {@code View}.
- *
- * @deprecated Direct evaluation of {@link View}s is deprecated.  Instead, create an
- *             {@link AccessibilityHierarchy} using a source {@link View}, and run
- *             {@link AccessibilityHierarchyCheck}s obtained with {@link AccessibilityCheckPreset}.
- *             Results will be provided in the form of {@link AccessibilityHierarchyCheckResult}s.
- */
-@Deprecated
+/** Result generated when an accessibility check runs on a {@code View}. */
 public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
 
+  private final @Nullable ViewHierarchyElement element;
   private final @Nullable View view;
   private final @Nullable Image viewImage;
   private final @Nullable AccessibilityHierarchyCheckResult hierarchyCheckResult;
@@ -55,6 +49,7 @@ public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
       @Nullable View view,
       @Nullable Image viewImage) {
     super(checkClass, type, message);
+    element = null;
     this.view = view;
     this.viewImage = viewImage;
     hierarchyCheckResult = null;
@@ -69,6 +64,7 @@ public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
     this(checkClass, type, message, view, /* viewImage= */ null);
   }
 
+
   /**
    * Constructor that takes an AccessibilityHierarchyCheckResult.
    *
@@ -77,8 +73,10 @@ public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
   /* package */ AccessibilityViewCheckResult(
       Class<? extends AccessibilityCheck> checkClass,
       AccessibilityHierarchyCheckResult hierarchyCheckResult,
+      @Nullable ViewHierarchyElement element,
       @Nullable View view) {
     super(checkClass, hierarchyCheckResult.getType(), /* message= */ null);
+    this.element = element;
     this.view = view;
     viewImage =
         (hierarchyCheckResult instanceof AccessibilityHierarchyCheckResultWithImage)
@@ -91,21 +89,24 @@ public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
    * Returns a copy of this result, but with the AccessibilityCheckResultType changed to SUPPRESSED.
    */
   public AccessibilityViewCheckResult getSuppressedResultCopy() {
-    if (hierarchyCheckResult == null) {
-      return new AccessibilityViewCheckResult(
-          getSourceCheckClass(),
-          AccessibilityCheckResultType.SUPPRESSED,
-          getMessage(Locale.ENGLISH),
-          getView());
-    } else {
-      return new AccessibilityViewCheckResult(
-          getSourceCheckClass(), hierarchyCheckResult.getSuppressedResultCopy(), getView());
-    }
+    AccessibilityViewCheckResult result =
+        (hierarchyCheckResult == null)
+            ? new AccessibilityViewCheckResult(
+                getSourceCheckClass(),
+                AccessibilityCheckResultType.SUPPRESSED,
+                getMessage(Locale.ENGLISH),
+                getView())
+            : new AccessibilityViewCheckResult(
+                getSourceCheckClass(),
+                hierarchyCheckResult.getSuppressedResultCopy(),
+                getElement(),
+                getView());
+    return result;
   }
 
   /**
    * Returns the view to which the result applies, or {@code null} if the result does not apply to a
-   * specific {@code View}.
+   * specific {@code View} or the view is not available.
    */
   public @Nullable View getView() {
     return view;
@@ -117,13 +118,31 @@ public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
   }
 
   /**
+   * Returns the element to which the result applies, or {@code null} if the result does not apply
+   * to a specific element or the element is not available.
+   */
+  public @Nullable ViewHierarchyElement getElement() {
+    return element;
+  }
+
+  /**
+   * Returns the AccessibilityHierarchyCheckResult with which this result was constructed.
+   *
+   * @throws NullPointerException if this result was not constructed with an
+   *     AccessibilityHierarchyCheckResult
+   */
+  public AccessibilityHierarchyCheckResult getAccessibilityHierarchyCheckResult() {
+    return checkNotNull(hierarchyCheckResult);
+  }
+
+  /**
    * Returns the type of AccessibilityHierarchyCheck that detected this result.
    *
    * @throws NullPointerException if this result was not constructed with an
    *     AccessibilityHierarchyCheckResult
    */
   public Class<? extends AccessibilityHierarchyCheck> getAccessibilityHierarchyCheck() {
-    return checkNotNull(hierarchyCheckResult)
+    return getAccessibilityHierarchyCheckResult()
         .getSourceCheckClass()
         .asSubclass(AccessibilityHierarchyCheck.class);
   }
@@ -136,8 +155,9 @@ public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
    *     AccessibilityHierarchyCheckResult
    */
   public int getResultId() {
-    return checkNotNull(hierarchyCheckResult).getResultId();
+    return getAccessibilityHierarchyCheckResult().getResultId();
   }
+
 
   /**
    * Retrieve the metadata stored in this result.
@@ -148,7 +168,7 @@ public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
    */
   @Pure
   public @Nullable ResultMetadata getMetadata() {
-    return checkNotNull(hierarchyCheckResult).getMetadata();
+    return getAccessibilityHierarchyCheckResult().getMetadata();
   }
 
   @Override
@@ -161,5 +181,12 @@ public class AccessibilityViewCheckResult extends AccessibilityCheckResult {
     return (hierarchyCheckResult == null)
         ? super.getMessage(locale)
         : hierarchyCheckResult.getMessage(locale);
+  }
+
+  // For debugging
+  @Override
+  public String toString() {
+    return String.format(
+        "[AccessibilityViewCheckResult check=%s view=%s]", hierarchyCheckResult, view);
   }
 }
